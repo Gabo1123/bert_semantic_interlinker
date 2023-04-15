@@ -1,5 +1,9 @@
 import streamlit as st
 
+python3 -m venv myenv
+source myenv/bin/activate
+pip install streamlit pandas requests stqdm chardet
+
 # region format
 st.set_page_config(page_title="Keyword Difficulty Finder", page_icon="🔎",
                    layout="wide")  # needs to be the first thing after the streamlit import
