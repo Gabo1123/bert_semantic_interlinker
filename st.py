@@ -1,328 +1,100 @@
-import streamlit as st
+""" Automatic Website Migration Tool, By @LeeFootSEO - 03/04/2023"""
 
-# region format
-st.set_page_config(page_title="BERT Semantic Interlinking App", page_icon="🔗",
-                   layout="wide")  # needs to be the first thing after the streamlit import
-
-from io import BytesIO
-from streamlit_echarts import st_echarts
-from urllib.parse import urlparse
-import chardet
 import pandas as pd
-from sentence_transformers import SentenceTransformer, util
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from tqdm import tqdm
+import torch
 
-finish = False
+# Check if CUDA is available
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
 
+# Define a list of column names to match on
+all_columns = ["Address", "H1-1", "Title 1"]
 
-st.write(
-    "Made in [![this is an image link](https://i.imgur.com/iIOA6kU.png)](https://www.streamlit.io/) by [@LeeFootSEO](https://twitter.com/LeeFootSEO) / [![this is an image link](https://i.imgur.com/bjNRJra.png)](https://www.buymeacoffee.com/leefootseo) [Support My Work! Buy me a coffee!](https://www.buymeacoffee.com/leefootseo)")
+# Load the first CSV file into a pandas dataframe
+df_live = pd.read_csv('/python_scripts/migration_mapper/live.csv', dtype="str")
 
-st.title("BERT Semantic Interlinking Tool")
-st.subheader("Upload a crawl file to find semantically relevant pages to interlink. (Unlimited Version)")
-model_radio_button = st.sidebar.radio(
-    "Transformer model",
-    [
-        "multi-qa-mpnet-base-dot-v1",
-        "paraphrase-multilingual-MiniLM-L12-v2",
-        "paraphrase-MiniLM-L3-v2",
-    ],
-    help="""the model to use for the clustering.
+# Load the second CSV file into a pandas dataframe
+df_staging = pd.read_csv('/python_scripts/migration_mapper/staging.csv', dtype="str")
 
-    - multi-qa-mpnet-base-dot-v1 - Best Semantic Clustering (🐌)
-    - paraphrase-multilingual-MiniLM-L12-v2 - Best Multi-Lingual Clustering (💬)
-    - paraphrase-MiniLM-L3-v2 - Best Performance (💨)"""
-)
+# Load a pre-trained BERT model from the sbert library
+model = SentenceTransformer('all-distilroberta-v1')  # best
 
-@st.cache(allow_output_mutation=True)
-def get_model():
-    model = SentenceTransformer(model_radio_button)
-    return model
+df_live[all_columns] = df_live[all_columns].apply(lambda x: x.str.lower())
+df_staging[all_columns] = df_staging[all_columns].apply(lambda x: x.str.lower())
 
-model = get_model()
+# Precompute the embeddings for each column and normalize them
+encoded_cols_live = {}
+encoded_cols_staging = {}
 
-accuracy_slide = st.sidebar.slider("Set Cluster Accuracy: 0-100", value=75)
-min_cluster_size = st.sidebar.slider("Set Minimum Cluster Size: 0-100", value=2)
-source_filter = st.sidebar.text_input('Filter Source URL Type')
-destination_filter = st.sidebar.text_input('Filter Destination URL Type')
-min_similarity = accuracy_slide / 100
+for col in tqdm(all_columns, desc='Precomputing embeddings'):
+    encoded_cols_live[col] = model.encode(df_live[col].astype(str).tolist(), convert_to_tensor=True).cpu().numpy()
+    encoded_cols_live[col] /= np.linalg.norm(encoded_cols_live[col], axis=1, keepdims=True)
+    encoded_cols_staging[col] = model.encode(df_staging[col].astype(str).tolist(), convert_to_tensor=True).cpu().numpy()
+    encoded_cols_staging[col] /= np.linalg.norm(encoded_cols_staging[col], axis=1, keepdims=True)
 
-uploaded_file = st.file_uploader(
-    "Upload your crawl file",
-    help="""Upload a Screaming Frog internal_html.csv file""")
+all_matches = []
 
-if uploaded_file is not None:
+for col in all_columns:
+    # Drop NaN values for this column in both dataframes
+    live_col = df_live[col].dropna()
+    staging_col = df_staging[col].dropna()
 
-    try:
+    # Retrieve the precomputed embeddings for each matching column
+    encoded_df_live = encoded_cols_live[col][live_col.index]
+    encoded_df_staging = encoded_cols_staging[col][staging_col.index]
 
-        result = chardet.detect(uploaded_file.getvalue())
-        encoding_value = result["encoding"]
+    # Convert NumPy arrays to PyTorch tensors
+    encoded_df_live = torch.from_numpy(encoded_df_live).to(device)
+    encoded_df_staging = torch.from_numpy(encoded_df_staging).to(device)
 
-        if encoding_value == "UTF-16":
-            white_space = True
+    # Compute the cosine similarity between the two matrices
+    cosine_similarities = torch.matmul(encoded_df_live, encoded_df_staging.T).cpu().numpy()
+
+    # Find the best match between the two dataframes
+    matches = []
+
+    # Loop through each row in the live dataframe
+    desc = f'Matching {len(live_col)} rows in live dataframe with column {col}'
+    for i, row in enumerate(tqdm(encoded_df_live, desc=desc)):
+        best_score = np.max(cosine_similarities[i])
+        best_match = np.argmax(cosine_similarities[i])
+        if best_score > 0:
+            matches.append({'Live Address': df_live.loc[live_col.index[i], 'Address'],
+                            'Staging Address': df_staging.loc[staging_col.index[best_match], 'Address'],
+                            'Matching Column': col, 'Highest Score': best_score})
         else:
-            white_space = False
+            matches.append({'Live Address': df_live.loc[live_col.index[i], 'Address'], 'Staging Address': '',
+                            'Matching Column': col, 'Highest Score': 0})
 
-        df = pd.read_csv(
-            uploaded_file,
-            encoding=encoding_value,
-            delim_whitespace=white_space,
-            error_bad_lines=False,
-        )
-        
-        # rename multi language columns
-        df.rename(columns={"Adresse": "Address", "Dirección": "Address", "Indirizzo": "Address"}, inplace=True)
-        number_of_rows = len(df)
+    # Append matches for this column to the overall list of matches
+    all_matches.extend(matches)
 
-        if number_of_rows == 0:
-            st.caption("Your sheet seems empty!")
+# Convert the matches to a pandas dataframe
+df = pd.DataFrame(all_matches)
+df = df.sort_values(by="Highest Score", ascending=False)
 
-        with st.expander("↕️ View raw data", expanded=False):
-            st.write(df)
+# calculate median and number of columns matched on
+median_scores = df.groupby('Live Address')['Highest Score'].median()
+num_matched_cols = df.groupby('Live Address')['Matching Column'].count()
 
-    except UnicodeDecodeError:
-        st.warning(
-            """
-            🚨 The file doesn't seem to load. Check the filetype, file format and Schema
+# create new columns in the original dataframe
+df['Median Score'] = df['Live Address'].map(median_scores)
+df['Number of Columns Matched'] = df['Live Address'].map(num_matched_cols)
 
-            """
-        )
+# Drop duplicates based on the "Live Address" column
+df.drop_duplicates(subset=['Live Address'], keep="first", inplace=True)
 
-else:
-    st.stop()
+# Group the matches by the "Live Address" column and select the highest scoring match for each group
+df_max = df.groupby('Live Address').apply(lambda x: x.loc[x['Highest Score'].idxmax()]).reset_index(drop=True)
 
-with st.form(key='columns_in_form_2'):
-    st.subheader("Please Select the Column to Match (Recommend H1 / Title or Extracted Content)")
-    kw_col = st.selectbox('Select the keyword column:', df.columns)
-    submitted = st.form_submit_button('Submit')
-    if submitted:
-        df[kw_col] = df[kw_col].str.encode('ascii', 'ignore').str.decode('ascii')
-        df.drop_duplicates(subset=kw_col, inplace=True)
-        st.info("Finding Interlinking Opportunities, This May Take a While! Please Wait!")
+# Output the final dataframe to a CSV file
+df_max.to_csv("/python_scripts/migration_mapper_output.csv", index=False)
 
-        # store the data
-        cluster_name_list = []
-        corpus_sentences_list = []
-        df_all = []
+# Find the unmatched rows in the staging dataframe
+staging_unmatched = df_staging[~df_staging['Address'].isin(df_max['Staging Address'])]
 
-        corpus_set = set(df[kw_col])
-        corpus_set_all = corpus_set
-
-        cluster = True
-
-        while cluster:
-
-            corpus_sentences = list(corpus_set)
-            check_len = len(corpus_sentences)
-            corpus_embeddings = model.encode(corpus_sentences, batch_size=256, show_progress_bar=True,
-                                             convert_to_tensor=True)
-            clusters = util.community_detection(corpus_embeddings, min_community_size=2, threshold=min_similarity)
-
-            for keyword, cluster in enumerate(clusters):
-                for sentence_id in cluster[0:]:
-                    corpus_sentences_list.append(corpus_sentences[sentence_id])
-                    cluster_name_list.append("Cluster {}, #{} Elements ".format(keyword + 1, len(cluster)))
-
-            df_new = pd.DataFrame(None)
-            df_new['source_h1'] = cluster_name_list
-            df_new[kw_col] = corpus_sentences_list
-
-            df_all.append(df_new)
-            have = set(df_new[kw_col])
-
-            corpus_set = corpus_set_all - have
-            remaining = len(corpus_set)
-
-            if check_len == remaining:
-                break
-
-        df_new = pd.concat(df_all)
-        df = df.merge(df_new.drop_duplicates(kw_col), how='left', on=kw_col)
-
-        # ------------------------------ rename the clusters to the shortest keyword -----------------------------------
-
-        df['length'] = df[kw_col].astype(str).map(len)
-        df = df.sort_values(by="length", ascending=True)
-        df['source_h1'] = df.groupby('source_h1')[kw_col].transform('first')
-        df.sort_values(['source_h1', kw_col], ascending=[True, True], inplace=True)
-        df['source_h1'] = df['source_h1'].fillna("zzz_no_cluster")
-        del df['length']
-
-        col = df.pop(kw_col)
-        df.insert(0, col.name, col)
-        col = df.pop('source_h1')
-        df.insert(0, col.name, col)
-        df2 = df[["Address", kw_col]].copy()
-        df2.rename(columns={"Address": "source_url", kw_col: "source_h1"}, inplace=True)
-
-        df2 = df2.loc[:, ~df2.columns.duplicated()].copy()
-        if 'source_url' not in df2.columns:
-            df2['source_url'] = df2['source_h1']
-
-        df = df.merge(df2.drop_duplicates('source_h1'), how='left', on="source_h1")  # merge on first instance only
-        df = df[["source_url", "source_h1", "Address", kw_col]]
-        try:
-            df.drop_duplicates(subset=["Address", "source_url"], keep="first", inplace=True)
-        except AttributeError:
-            st.warning("No Results Found! Try Matching on a Different Column! (Recommend H1 or Extracted Content)")
-            st.stop()
-
-        try:
-            df = df[df["Address"].str.contains(destination_filter, na=False)]
-        except AttributeError:
-            st.warning("No Results Found! Try Matching on a Different Column! (Recommend H1 / Title or Extracted Content)")
-            st.stop()
-
-        df = df[df["source_url"].str.contains(source_filter, na=False)]
-
-        df = df[~df["Address"].str.contains("zzz_no_cluster", na=False)]
-        df.rename(columns={"Address": "destination_url", kw_col: "destination_url_h1"}, inplace=True)
-        df['source_h1'] = df['source_h1'].str.lower()
-        df['destination_url_h1'] = df['destination_url_h1'].str.lower()
-        df['check'] = df['source_url'] == df['destination_url']
-        df = df[~df["check"].isin([True])]
-        del df['check']
-        finish = True
-
-# make excel output and visualise results ------------------------------------------------------------------------------
-if finish == True:
-
-    df_list = []
-    sheet_list = []
-
-    # clean special characters
-    spec_chars = ["!", '"', "#", "%", "&", "'", "(", ")",
-                  "*", "+", ",", ".", "/", ":", ";", "<",
-                  "=", ">", "?", "@", "[", "\\", "]", "^",
-                  "`", "{", "|", "}", "~", "–"]
-
-    df['source_h1'] = df['source_h1'].str.encode('ascii', 'ignore').str.decode('ascii')
-
-    # make the dataframe for visualisation
-    df_autocomplete_full = df.copy()
-
-    # extracts the domain from the address column if present
-    try:
-        extracted_domain = df['source_url'].iloc[0]
-        url = extracted_domain
-        o = urlparse(url)
-        domain = o.netloc
-        df_autocomplete_full['seed'] = domain
-    except IndexError:
-        df_autocomplete_full['seed'] = "crawl"
-    filt = list(set(df['source_h1']))
-
-    df_list.append(df)
-    sheet_list.append("All Results")
-
-    for i in filt:
-
-        worksheet_name = i.replace(" ", "_")
-        for char in spec_chars:
-            worksheet_name = worksheet_name.replace(char, "")
-            worksheet_name = worksheet_name.replace("  ", "_")
-
-        worksheet_name = worksheet_name[0:31]
-        sheet_list.append(worksheet_name)
-        try:
-            df_list.append(df[df['source_h1'].str.contains(i)].copy())
-        except Exception:
-            pass
-
-    # save to Excel sheet
-    def dfs_tabs(df_list, sheet_list, file_name):  # function to save all dataframes to one single excel doc
-
-        output = BytesIO()
-        writer = pd.ExcelWriter(output, engine='xlsxwriter')
-        for dataframe, sheet in zip(df_list, sheet_list):
-            dataframe.to_excel(writer, sheet_name=sheet, startrow=0, startcol=0, index=False)
-
-        writer.save()
-        processed_data = output.getvalue()
-        return processed_data
-
-    df_xlsx = dfs_tabs(df_list, sheet_list, 'serp-cluster-output.xlsx')
-    st.download_button(label='📥 Download BERT Interlinking Opportunities', data=df_xlsx, file_name='bert_interlinking_opportunities.xlsx')
-
-    # visualise result -----------------------------------------------------------------------------------------------------
-    def visualize_autocomplete(df_autocomplete_full):
-        try:
-            query = df_autocomplete_full['seed'].iloc[0]
-        except IndexError:
-            query = ""
-
-        for query in df_autocomplete_full['seed'].unique():
-            df_autocomplete_full = df_autocomplete_full[df_autocomplete_full['seed'] == query]
-            children_list = []
-            children_list_level_1 = []
-
-            for int_word in df_autocomplete_full['source_h1']:
-                q_lv1_line = {"name": int_word}
-                if not q_lv1_line in children_list_level_1:
-                    children_list_level_1.append(q_lv1_line)
-
-                children_list_level_2 = []
-
-                for query_2 in df_autocomplete_full[df_autocomplete_full['source_h1'] == int_word][
-                    'destination_url_h1']:
-                    q_lv2_line = {"name": query_2}
-                    children_list_level_2.append(q_lv2_line)
-
-                level2_tree = {'name': int_word, 'children': children_list_level_2}
-
-                if not level2_tree in children_list:
-                    children_list.append(level2_tree)
-
-                tree = {'name': query, 'children': children_list}
-
-                opts = {
-                    "backgroundColor": "#F0F2F6",
-
-
-                    "title": {
-                        # "subtext": "https://tools.alekseo.com/askey.html",
-                        # "text": f"Questions Map for: «{query}»",
-                        "x": 'center',
-                        "y": 'top',
-                        "top": "5%",
-
-                        "textStyle": {
-                            "fontSize": 22,
-
-                        },
-                        "subtextStyle": {
-                            "fontSize": 15,
-                            "color": '#2ec4b6',
-
-                        },
-                    },
-
-                    "series": [
-                        {
-                            "type": "tree",
-                            "data": [tree],
-                            "layout": "radial",
-                            "top": "10%",
-                            "left": "25%",
-                            "bottom": "5%",
-                            "right": "25%",
-                            "symbolSize": 20,
-                            "itemStyle": {
-                                "color": '#2ec4b6',
-                            },
-                            "label": {
-                                "fontSize": 14,
-
-                            },
-
-                            "expandAndCollapse": True,
-                            "animationDuration": 550,
-                            "animationDurationUpdate": 750,
-                        }
-                    ],
-                }
-            st.caption("Right mouse click to save as image.")
-            st_echarts(opts, key=query, height=1700)
-
-    st.header("Visualising First 100 Results")
-    df_autocomplete_full = df_autocomplete_full[:100]
-    visualize_autocomplete(df_autocomplete_full)
+# Output the unmatched rows to a separate CSV file
+staging_unmatched.to_csv('/python_scripts/staging_unmatched.csv', index=False)
