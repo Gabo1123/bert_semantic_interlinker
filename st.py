@@ -1,100 +1,318 @@
-""" Automatic Website Migration Tool, By @LeeFootSEO - 03/04/2023"""
+import streamlit as st
+
+# region format
+st.set_page_config(page_title="Keyword Difficulty Finder", page_icon="🔎",
+                   layout="wide")  # needs to be the first thing after the streamlit import
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
 
 import pandas as pd
-import numpy as np
-from sentence_transformers import SentenceTransformer
-from tqdm import tqdm
-import torch
+import requests
+from io import BytesIO
+import chardet
+from stqdm import stqdm
 
-# Check if CUDA is available
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
+st.write(
+    "Made in [![this is an image link](https://i.imgur.com/iIOA6kU.png)](https://www.streamlit.io/) with :heart: by [@LeeFootSEO](https://twitter.com/LeeFootSEO)")
+st.title("Keyword Difficulty Finder")
 
-# Define a list of column names to match on
-all_columns = ["Address", "H1-1", "Title 1"]
+# streamlit variables
+uploaded_file = st.file_uploader("Upload your keyword report")
 
-# Load the first CSV file into a pandas dataframe
-df_live = pd.read_csv('/python_scripts/migration_mapper/live.csv', dtype="str")
+value_serp_key = st.sidebar.text_input('Enter your ValueSERP Key')  # good
+device = st.sidebar.radio("Select the device to search Google", ('Mobile', 'Desktop', 'Tablet'))
+location_select = st.sidebar.selectbox('Select the location to search Google', (
+'United States', 'United Kingdom', 'Australia', 'India', 'Spain', 'Italy', 'Canada', 'Germany', 'Ireland', 'France',
+'Holland'))
+threads = st.sidebar.slider("Set number of threads", value=10, min_value=1, max_value=20)
+common_urls = st.sidebar.slider("Set number of common urls to match", value=3, min_value=2, max_value=5)
+max_diff = st.sidebar.slider("Set minimum keyword difficulty", value=10, min_value=0, max_value=99)
+filter_questions = st.sidebar.checkbox('Select only question keywords?', value=False)
 
-# Load the second CSV file into a pandas dataframe
-df_staging = pd.read_csv('/python_scripts/migration_mapper/staging.csv', dtype="str")
+if uploaded_file is not None:
 
-# Load a pre-trained BERT model from the sbert library
-model = SentenceTransformer('all-distilroberta-v1')  # best
+    try:
 
-df_live[all_columns] = df_live[all_columns].apply(lambda x: x.str.lower())
-df_staging[all_columns] = df_staging[all_columns].apply(lambda x: x.str.lower())
+        result = chardet.detect(uploaded_file.getvalue())
+        encoding_value = result["encoding"]
 
-# Precompute the embeddings for each column and normalize them
-encoded_cols_live = {}
-encoded_cols_staging = {}
-
-for col in tqdm(all_columns, desc='Precomputing embeddings'):
-    encoded_cols_live[col] = model.encode(df_live[col].astype(str).tolist(), convert_to_tensor=True).cpu().numpy()
-    encoded_cols_live[col] /= np.linalg.norm(encoded_cols_live[col], axis=1, keepdims=True)
-    encoded_cols_staging[col] = model.encode(df_staging[col].astype(str).tolist(), convert_to_tensor=True).cpu().numpy()
-    encoded_cols_staging[col] /= np.linalg.norm(encoded_cols_staging[col], axis=1, keepdims=True)
-
-all_matches = []
-
-for col in all_columns:
-    # Drop NaN values for this column in both dataframes
-    live_col = df_live[col].dropna()
-    staging_col = df_staging[col].dropna()
-
-    # Retrieve the precomputed embeddings for each matching column
-    encoded_df_live = encoded_cols_live[col][live_col.index]
-    encoded_df_staging = encoded_cols_staging[col][staging_col.index]
-
-    # Convert NumPy arrays to PyTorch tensors
-    encoded_df_live = torch.from_numpy(encoded_df_live).to(device)
-    encoded_df_staging = torch.from_numpy(encoded_df_staging).to(device)
-
-    # Compute the cosine similarity between the two matrices
-    cosine_similarities = torch.matmul(encoded_df_live, encoded_df_staging.T).cpu().numpy()
-
-    # Find the best match between the two dataframes
-    matches = []
-
-    # Loop through each row in the live dataframe
-    desc = f'Matching {len(live_col)} rows in live dataframe with column {col}'
-    for i, row in enumerate(tqdm(encoded_df_live, desc=desc)):
-        best_score = np.max(cosine_similarities[i])
-        best_match = np.argmax(cosine_similarities[i])
-        if best_score > 0:
-            matches.append({'Live Address': df_live.loc[live_col.index[i], 'Address'],
-                            'Staging Address': df_staging.loc[staging_col.index[best_match], 'Address'],
-                            'Matching Column': col, 'Highest Score': best_score})
+        if encoding_value == "UTF-16":
+            white_space = True
         else:
-            matches.append({'Live Address': df_live.loc[live_col.index[i], 'Address'], 'Staging Address': '',
-                            'Matching Column': col, 'Highest Score': 0})
+            white_space = False
 
-    # Append matches for this column to the overall list of matches
-    all_matches.extend(matches)
+        df_comp = pd.read_csv(uploaded_file, encoding=encoding_value, delim_whitespace=white_space, on_bad_lines='skip')
+        number_of_rows = len(df_comp)
 
-# Convert the matches to a pandas dataframe
-df = pd.DataFrame(all_matches)
-df = df.sort_values(by="Highest Score", ascending=False)
+        if number_of_rows == 0:
+            st.caption("Your sheet seems empty!")
 
-# calculate median and number of columns matched on
-median_scores = df.groupby('Live Address')['Highest Score'].median()
-num_matched_cols = df.groupby('Live Address')['Matching Column'].count()
+        with st.expander("↕ View raw data", expanded=False):
+            st.write(df_comp)
 
-# create new columns in the original dataframe
-df['Median Score'] = df['Live Address'].map(median_scores)
-df['Number of Columns Matched'] = df['Live Address'].map(num_matched_cols)
+    except UnicodeDecodeError:
+        st.warning("""🚨 The file doesn't seem to load. Check the filetype, file format and Schema""")
 
-# Drop duplicates based on the "Live Address" column
-df.drop_duplicates(subset=['Live Address'], keep="first", inplace=True)
+else:
+    st.info("👆 Upload a .csv or .txt file first.")
+    st.stop()
 
-# Group the matches by the "Live Address" column and select the highest scoring match for each group
-df_max = df.groupby('Live Address').apply(lambda x: x.loc[x['Highest Score'].idxmax()]).reset_index(drop=True)
+with st.form(key='columns_in_form_2'):
+    st.subheader("Please Select the Keyword Column")
+    kw_col = st.selectbox('Select the Keyword column:', df_comp.columns)
 
-# Output the final dataframe to a CSV file
-df_max.to_csv("/python_scripts/migration_mapper_output.csv", index=False)
+    submitted = st.form_submit_button('Submit')
 
-# Find the unmatched rows in the staging dataframe
-staging_unmatched = df_staging[~df_staging['Address'].isin(df_max['Staging Address'])]
+if submitted:
+    df_comp.rename(columns={kw_col: "Keyword"}, inplace=True)
+    if 'Difficulty' in df_comp.columns:
+        df_comp['Difficulty'] = df_comp['Difficulty'].fillna("0").astype(int)
+        df_comp = df_comp[df_comp.Difficulty <= max_diff]
 
-# Output the unmatched rows to a separate CSV file
-staging_unmatched.to_csv('/python_scripts/staging_unmatched.csv', index=False)
+    if filter_questions:
+        q_words = "who |what |where |why |when |how |is |are |does |do |can "
+        df_comp = df_comp[df_comp['Keyword'].str.contains(q_words)]
+
+    # make the initial keyword list
+    kws = list(set(df_comp['Keyword']))
+    with st.expander("↕ View keywords to process", expanded=False):
+        st.write(kws)
+
+    # set up the request parameters
+    params = {
+        'api_key': value_serp_key
+    }
+
+    # get account info from valueserp
+    api_result = requests.get('https://api.valueserp.com/account', params)
+    ac_response_df = json.loads(api_result.text)
+    account_result = ac_response_df.get('account_info')
+
+    # assign account variables
+    credits_remain = account_result.get('topup_credits_remaining')
+    rate_limit = account_result.get('rate_limit_per_minute')
+
+    # calculate credits required and time remaining
+    kws_req = len(kws) * 3
+    units = " seconds"
+    minute_calc = kws_req / rate_limit
+    second_calc = minute_calc * 60
+    if second_calc > 59.9:
+        second_calc = second_calc / 60
+        units = " minutes"
+
+    st.info("Keywords to Process: {} - Available Credits: {} - Rate Limit {} - Estimated Completion Time: {}{}".format(
+        kws_req, credits_remain, rate_limit, second_calc, units))
+
+    if kws_req > credits_remain:
+        st.write("Not enough credits to process batch!")
+        st.stop()
+
+    # create allintitle and phrase matches
+    df_comp['allintitle_kw_temp'] = "allintitle: " + df_comp['Keyword']
+    df_comp['quoted_kw_temp'] = '"' + df_comp['Keyword'] + '"'
+
+    # extend kw list with allintitle and phrase matches
+    kws.extend(df_comp['allintitle_kw_temp'].tolist())
+    kws.extend(df_comp['quoted_kw_temp'].tolist())
+
+    # delete the helper columns
+    del df_comp['allintitle_kw_temp']
+    del df_comp['quoted_kw_temp']
+
+    # store the main data
+    search_q = []
+    total_results = []
+
+    # store the serp cluster df data
+    link_l = []
+    query_padded_len = []
+
+    counter = 0
+
+
+    def get_serp(kw):
+        global counter
+        counter += 1
+        global list_counter
+        print(f'Searching Google for: {kw}', "(", counter, "of", len(kws), ")")
+
+        params = {
+            'api_key': value_serp_key,
+            'q': kw,
+            'location': location_select,
+            'include_fields': ['organic_results', 'search_information'],
+            'location_auto': True,
+            'device': "Desktop",
+            'output': 'json',
+            'page': '1',
+            'num': '10'
+        }
+
+        response = requests.get('https://api.valueserp.com/search', params)
+        response_data = json.loads(response.text)
+        result = response_data.get('search_information')
+        total_results.append((result['total_results']))
+        search_q.append(kw)
+        query_padded_len.append(kw)
+
+        result_links = response_data.get('organic_results')
+
+        for var in result_links:
+            try:
+                link_l.append(var['link'])
+            except Exception:
+                link_l.append("")
+
+            max_list_len = max(len(link_l), len(query_padded_len))
+
+            if len(query_padded_len) != max_list_len:
+                diff = max_list_len - len(query_padded_len)
+                query_padded_len.extend([kw] * diff)
+
+
+    # use stqdm with concurrent futures
+    with stqdm(total=len(kws)) as pbar:
+        with ThreadPoolExecutor(max_workers=threads) as ex:
+            futures = [ex.submit(get_serp, url) for url in kws]
+            for future in as_completed(futures):
+                result = future.result()
+                pbar.set_description("Searching Keywords: ")
+                pbar.update(1)
+
+    print("Finished searching!")
+    df_results = pd.DataFrame(None)
+    df_results['Keyword'] = search_q
+    df_results['Total Results'] = total_results
+
+    # make two dfs from the results df to merge back into the main df vlookup style
+    try:
+        df_results_allintitle = df_results[df_results['Keyword'].str.contains("allintitle")].copy()
+    except AttributeError:
+        st.warning("No Matching Keywords After Filtering Options Set. Please Check and Try Again!")
+        st.stop()
+    df_results_phrase = df_results[df_results['Keyword'].str.contains('"')].copy()
+
+    # rename the column names ready for the vlookup style match
+    df_results.rename(columns={"Total Results": "Search Results"}, inplace=True)
+    df_results_phrase.rename(columns={"Total Results": "Quoted Results"}, inplace=True)
+    df_results_allintitle.rename(columns={"Total Results": "Allintite Results"}, inplace=True)
+
+    # remove the keyword modifiers for matching
+    df_results_phrase['Keyword'] = df_results_phrase['Keyword'].apply(lambda x: x.replace('\"', ''))
+    df_results_allintitle['Keyword'] = df_results_allintitle['Keyword'].apply(lambda x: x.replace('allintitle: ', ''))
+
+    # do the vlookup merge
+    df_comp = pd.merge(df_comp, df_results[['Keyword', 'Search Results']], on='Keyword', how='left')
+    df_comp = pd.merge(df_comp, df_results_phrase[['Keyword', 'Quoted Results']], on='Keyword', how='left')
+    df_comp = pd.merge(df_comp, df_results_allintitle[['Keyword', 'Allintite Results']], on='Keyword', how='left')
+
+    # make the cluster df
+    df_cluster = pd.DataFrame(None)
+    df_cluster["keyword"] = query_padded_len
+    df_cluster["link"] = link_l
+
+    # remove the keyword modifiers before clustering
+    df_cluster['keyword'] = df_cluster['keyword'].apply(lambda x: x.replace('\"', ''))
+    df_cluster['keyword'] = df_cluster['keyword'].apply(lambda x: x.replace('allintitle: ', ''))
+    df_cluster.drop_duplicates(subset=["keyword", "link"], keep="first", inplace=True)
+
+    # -------------- start cluster logic
+    # sort and group kws, drop any under min threshold
+    df_cluster_cluster = df_cluster.sort_values(by="keyword", ascending=True)
+    df_cluster = df_cluster.groupby('link')['keyword'].apply(','.join).reset_index()
+    df_cluster["temp_count"] = (df_cluster["keyword"].str.count(",") + 1)
+    df_cluster = df_cluster[df_cluster["temp_count"] >= common_urls]
+
+    # keep only the longest version of each keyword group
+    list1 = df_cluster['keyword']
+    substrings = {w1 for w1 in list1 for w2 in list1 if w1 in w2 and w1 != w2}
+    longest_str = set(list1) - substrings
+    longest_str = list(longest_str)
+
+    df_cluster = df_cluster[df_cluster['keyword'].isin(longest_str)]
+
+    # drop any cluster groups under the minimum threshold
+    df_cluster['temp_count'] = df_cluster['keyword'].map(df_cluster.groupby('keyword')['keyword'].count())
+    df_cluster = df_cluster[df_cluster["temp_count"] >= common_urls]
+
+    # make the cluster column & delete helper column
+    df_cluster['serp_cluster'] = df_cluster['keyword']
+
+    # explode the keyword list
+    df_cluster['keyword'] = df_cluster['keyword'].str.split(',')
+    df_cluster = df_cluster.explode('keyword')
+
+    df_cluster['temp_count'] = df_cluster['keyword'].astype(str).map(len)
+    df_cluster = df_cluster.sort_values(by="temp_count", ascending=True)
+    df_cluster['serp_cluster'] = df_cluster.groupby('serp_cluster')['keyword'].transform('first')
+    df_cluster.sort_values(['serp_cluster', "keyword"], ascending=[True, True], inplace=True)
+
+    del df_cluster['temp_count']
+    df_cluster.drop_duplicates(subset="keyword", inplace=True)
+
+    # clean the final df
+    try:
+        df_cluster['keyword'] = df_cluster['keyword'].str.strip()
+        df_cluster.drop_duplicates(subset=["keyword", "serp_cluster"], keep="first", inplace=True)
+        df_cluster.rename(columns={"keyword": "Keyword", "serp_cluster": "Serp Cluster"}, inplace=True)
+        df_comp = pd.merge(df_comp, df_cluster[['Keyword', 'Serp Cluster']], on='Keyword', how='left')
+        df_comp['Serp Cluster'] = df_comp['Serp Cluster'].fillna("zzz_no_cluster")
+    except AttributeError:
+        df_comp['Serp Cluster'] = "zzz_no_cluster"
+
+    # pop the columns to the front
+    col = df_comp.pop('Allintite Results')
+    df_comp.insert(0, col.name, col)
+    df_comp = df_comp.sort_values(by="Allintite Results", ascending=True)
+
+    col = df_comp.pop('Quoted Results')
+    df_comp.insert(0, col.name, col)
+    df_comp = df_comp.sort_values(by="Quoted Results", ascending=True)
+
+    col = df_comp.pop('Search Results')
+    df_comp.insert(0, col.name, col)
+    df_comp = df_comp.sort_values(by="Search Results", ascending=True)
+
+    col = df_comp.pop('Keyword')
+    df_comp.insert(0, col.name, col)
+    df_comp = df_comp.sort_values(by="Keyword", ascending=True)
+
+    col = df_comp.pop('Serp Cluster')
+    df_comp.insert(0, col.name, col)
+
+    # check if cluster size = 1 and overwrite with no_cluster
+    df_comp['cluster_count'] = df_comp['Serp Cluster'].map(df_comp.groupby('Serp Cluster')['Serp Cluster'].count())
+
+    df_comp.loc[df_comp["cluster_count"] == 1, "Serp Cluster"] = "zzz_no_cluster"
+    del df_comp['cluster_count']
+    df_comp = df_comp.sort_values(by="Serp Cluster", ascending=True)
+
+    # make question dataframe ------------------------------------------------------------------------------------------
+    q_words_filter = "who |what |where |why |when |how |is |are |does |do |can "
+    df_questions = df_comp[df_comp['Keyword'].str.contains(q_words_filter)]
+
+    # save to Excel sheet
+    dfs = [df_comp, df_questions]  # make a list of the dataframe to use as a sheet
+
+
+    # Function to save all dataframes to one single excel
+    @st.cache
+    def dfs_tabs(df_list, sheet_list, file_name):
+        output = BytesIO()
+        writer = pd.ExcelWriter(output, engine='xlsxwriter')
+        for dataframe, sheet in zip(df_list, sheet_list):
+            dataframe.to_excel(writer, sheet_name=sheet, startrow=0, startcol=0, index=False)
+        writer.save()
+        processed_data = output.getvalue()
+        return processed_data
+
+
+    # list of sheet names
+    sheets = ['Competitive Analysis', 'Questions Only']
+
+    df_xlsx = dfs_tabs(dfs, sheets, 'competitor_analysis.xlsx')
+    st.download_button(label='📥 Download the Results!',
+                       data=df_xlsx,
+                       file_name='df_serp_difficulty_checks.xlsx')
