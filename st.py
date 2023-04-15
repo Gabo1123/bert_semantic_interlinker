@@ -1,163 +1,186 @@
-import streamlit as st
+#HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH
+keyword= 'tecnis eyhance'  
+# change the keyword to whatever you want, for example keyword = 'buy backlink'
+#HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH
+# Parámetros opcionales
+idioma = 'en' # español => por ejemplo para inglés usar idioma = 'en'
+pais = 'en-us' # España => por ejemplo para Inglaterra usar pais = 'uk'
+nivelesScrapeo = 2 # Si quieres más resultados usa 2. A partir de 3 necesitarás proxies...
+loopPreguntasEnlugarDeBusquedas = True # True hace loop pusando preguntas PAA en lugar de hacer el loop con búsquedas relacionadas
+#HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH
 
-st.set_page_config(page_title="SERP Keyword Extractor by @LeeFootSEO", page_icon="📈",
-                   layout="wide")  # needs to be the first thing after the streamlit import
-import pandas as pd
+#!pip install pyopenSSl --upgrade
+!pip install selenium-wire
+from seleniumwire import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+import time
+#!apt update
+#!apt install chromium-chromedriver
+
+options = webdriver.ChromeOptions()
+options.add_argument('--headless')
+options.add_argument('--no-sandbox')
+options.add_argument('--disable-dev-shm-usage')
+options.add_argument("user-agent=Mozilla/5.0")
+options.add_argument("--window-size=1366,768")#360,851
+
+# iniciamos selenium
+wd = webdriver.Chrome(options=options)
+
+
+urlInicial = f"https://www.google.com/search?hl={idioma}&gl={pais}&q={keyword}&oq={keyword}"
+
+scrapeado = []
+contadorPreguntas = []
+contadorBusquedas = []
+contadorSuggest = []
+
+googleNosHaCazado = False
+
+# instalamos dependencias
+!pip install treelib
+
+from treelib import Node, Tree
+from bs4 import BeautifulSoup
 import requests
-import json
-from fuzzywuzzy import fuzz
-import altair as alt
+import random
 
-st.write(
-    "[![this is an image link](https://i.imgur.com/Ex8eeC2.png)](https://www.patreon.com/leefootseo) [Become a Patreon for Early Access, Support & More!](https://www.patreon.com/leefootseo)  |  Made in [![this is an image link](https://i.imgur.com/iIOA6kU.png)](https://www.streamlit.io/) by [@LeeFootSEO](https://twitter.com/LeeFootSEO)")
 
-with st.expander("How do I use this app?"):
-    st.write("""
 
-        1. You will need an API key from www.ValueSERP.Com - they offer 100 searches for free
-        Plenty to test this with!
-        2. Enter your API key, enter a seed keyword, and click submit.
-        3. This data can be used to dual optimise pages / expand on existing content etc""")
+# Función general => ojo se llama a si misma.
+def busquedaGlobal(busquedasX, nivel):
+  if googleNosHaCazado: return
+  print("--------------------------")
+  print(f"         Nivel {nivel}")
+  print("--------------------------")
 
-st.title("SERP Keyword Extractor - Find Related Keywords!")
+  subBusquedasRelacionadas = []
+  
+  for busqueda in busquedasX:
+    subBusquedas = busquedaIndividual(busqueda, nivel+1)
+    subBusquedasRelacionadas.extend(subBusquedas)
+  
+  if nivel < nivelesScrapeo:
+    busquedaGlobal(subBusquedasRelacionadas, nivel +1) # con cuidado con bucle infinito
 
-# streamlit variables
-q = st.text_input('Input Your Search Keyword')
-value_serp_key = st.sidebar.text_input('Input your ValueSERP API Key')
+# función de scrapeo de cada búsqueda/pregunta
+def busquedaIndividual(busqueda0X, nivel):
+  busqueda0 = busqueda0X[0]
+  url0 = busqueda0X[1] # opción url0 = f"https://www.google.com/search?hl={idioma}&gl={pais}&q={busqueda0}&oq={busqueda0}"
+  
+  global  googleNosHaCazado
+  if busqueda0.lower() in scrapeado or googleNosHaCazado == True: return []
+  
+  preguntas = []
+  busquedas = []
+  
+  tree = Tree() # arbol para reprensentarlo
+  tree.create_node(busqueda0, busqueda0.lower())  # root node        
+    
+  wd.get(url0) # navegamos hasta la url
+  
+  if ("URL: https://www.google.com/search?" in wd.page_source): # ¿Nos ha cazado google?
+    googleNosHaCazado = True
 
-location_select = st.sidebar.selectbox(
-    "Select The Region To Search Google From",
-    (
-        "United Kingdom",
-        "United States",
-        "Australia",
-        "France",
-        "Canada",
-        "Germany",
-        "Italy",
-        "Spain",
-    ),
-)
+    if nivel == 1:
+      print("-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------")
+      print("Sorry Google ha cazado la IP, para seguir scrapeando elimina el entorno de ejecución (En el menú, Entorno de ejecución/desconectarse y eliminar...) o haz una copia de este colab (archivo/guardar una copia en drive) y dale al play")
+      print("-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------")
+    else:
+      print("Google ens Roba, digo... Sorry Google nos ha cazado, fin del scrapeo de esta keyword")
+    
+    return []
 
-device_select = st.sidebar.selectbox(
-    "Select The Host Device To Use To Search Google",
-    (
-        "Desktop",
-        "Mobile",
-        "Tablet",
-    ),
-)
+  if nivel == 1:
+    acepto = wd.find_elements(by=By.CSS_SELECTOR, value="input[value='Acepto']")
+    if len(acepto) > 0:
+      acepto[0].click() 
 
-minimum_frequency = st.sidebar.slider("Set Minimum Keyword Frequency", min_value=1, max_value=10, value=2)
-num_pages = st.sidebar.slider("Set Number of Results to Analyse", min_value=10, max_value=100, value=20)
-minimum_frequency -= 1
-
-with st.form(key='columns_in_form_2'):
-    submitted = st.form_submit_button('Submit')
-
-if submitted:
-    st.write("Searching Google for: %s" % q)
-
-    query = []
-    title = []
-
-    params = {
-        'api_key': value_serp_key,
-        'q': q,
-        'location': location_select,
-        'include_fields': 'organic_results',
-        'location_auto': True,
-        'device': device_select,
-        'output': 'json',
-        'page': '1',
-        'num': num_pages
-    }
-
-    response = requests.get('https://api.valueserp.com/search', params)
-
-    response_data = json.loads(response.text)
-    result = response_data.get('organic_results')
-    if result == None:
-        st.info("No Data Received, Please Check Your API Key!")
-        st.stop()
-    for var in result:
+  comienza = random.randint(100, 500)/1000 # pongamos una pequeña espera random
+  time.sleep(comienza)
+  
+  # recupero preguntas frecuentes
+  PAA = wd.find_elements(by=By.CSS_SELECTOR, value="[class='xpc']") 
+  if len(PAA) > 0 : tree.create_node("Preguntas Frecuentes", "Preguntas Frecuentes" , parent= busqueda0.lower())
+  for boton in PAA:
+    enlaces = boton.find_elements(by=By.TAG_NAME, value="a")
+    for enlace in enlaces:
+      href = enlace.get_attribute('href')
+      if "/search" in href:
+        contadorPreguntas.append(boton.text.strip().lower())
+        if boton.text.strip() in tree: continue
         try:
-            title.append(var['title'])
-            query.append(q)
-        except Exception:
-            title.append("")
-            query.append(q)
+          tree.create_node(boton.text.strip(), boton.text.strip().lower(), parent= "Preguntas Frecuentes")
+        except:
+          continue # en algunos casos excepcionales el texto a añadir al arbol es demasiado largo meda pereza investigarlos
+        preguntas.append([boton.text.strip(), href])
 
-    # make the df
-    df = pd.DataFrame(None)
-    df['query'] = query
-    df['title'] = title
+  # recuperamos búsquedas relacionadas
+  busquedasRelacionadas = wd.find_elements(by=By.CSS_SELECTOR, value=".Q71vJc") 
+  if len(busquedasRelacionadas) > 0: tree.create_node("Búsquedas Relacionadas", "Búsquedas Relacionadas" , parent= busqueda0.lower())
 
-    # standardise delimiters
-    df['title'] = df['title'].str.replace("/", "|")
-    df['title'] = df['title'].str.replace("-", "|")
-    df['title'] = df['title'].str.replace(":", "|")
-    df['title'] = df['title'].str.replace("&", "|")
-    df['title'] = df['title'].str.replace(",", "|")
-    df['title'] = df['title'].str.lower()
+  for busqueda in busquedasRelacionadas:
+    contadorBusquedas.append(busqueda.text.strip().lower())
+    if busqueda.text.strip() in tree: continue
+    try:
+      tree.create_node(busqueda.text.strip().lower(), busqueda.text.strip().lower(), parent="Búsquedas Relacionadas")
+    except:
+      continue
+    busquedas.append([busqueda.text.strip(), busqueda.get_attribute('href')] )
 
-    # split on specific delimiter before exploding
-    df['title'] = df['title'].str.split('|')
+  # recuperamos google suggest
+  sugeridos = suggest(busqueda0)
+  sugeridos = [x for x in sugeridos if x !=busqueda0 and x.lower() not in tree]
+  if len(sugeridos) > 0 : tree.create_node("Google Suggest", "Google Suggest" , parent= busqueda0.lower())
 
-    # explode the column
-    df = df.explode('title').reset_index(drop=True)
-    df['title'] = df['title'].str.strip()  # strip out leading and trailing spaces
-    df['serp_frequency'] = df.groupby(["title"])["title"].transform("count")  # get the count
-    df = df.drop_duplicates(subset=['title'], keep="first")  # drop dupes
+  for sugerido in sugeridos:
+    contadorSuggest.append(sugerido.lower())
+    try:
+      tree.create_node(sugerido, sugerido.lower(), parent="Google Suggest")
+    except:
+      continue
+    
+  if len(tree) > 1: tree.show(key=False)
 
-    # drop rows containing a single word
-    df['total_words'] = df['title'].str.count(' ') + 1
+  scrapeado.append(busqueda0.lower()) # control para no repetir búsquedas
 
-    # drop single word keywords and rows with a frequency of 1
-    df = df[~df["serp_frequency"].isin([minimum_frequency])]
-    df = df[~df["total_words"].isin([minimum_frequency])]
+  if loopPreguntasEnlugarDeBusquedas: return preguntas # opción devolver preguntas
+  return busquedas # La opción por defecto es devolver búsquedas para el loop
+ 
+# función para recuperar datos de google suggest
+def suggest(key):
+  r = requests.get(f'http://suggestqueries.google.com/complete/search?output=toolbar&hl={idioma}&gl={pais}&q={key}')
+  soup = BeautifulSoup(r.content, 'html.parser')
+  sugg = [sugg['data'] for sugg in soup.find_all('suggestion')]
+  return sugg
+    
+      
+# Aquí empieza todo
+busquedaGlobal([[keyword, urlInicial]], 0)
 
-    df = df[~df["title"].str.contains("\.\.\.", na=False)]
-
-    if df.empty:
-        st.warning('No Opportunity Available for this Keyword - Please Search Again!')
-        st.stop()
-
-    df['similarity'] = df.apply(lambda x: fuzz.partial_ratio(x['query'], x['title']), axis=1)
-
-    # clean up the df
-    df.rename(columns={"title": "extracted_keywords"}, inplace=True)
-    del df['total_words']
-    df['query'] = df['query'].str.lower()
-
-    st.subheader("📊 Related Keywords Graph")
-    chart = (
-        alt.Chart(df)
-            .mark_bar()
-            .encode(
-            alt.X("extracted_keywords:O"),
-            alt.Y("serp_frequency"),
-            alt.Color("extracted_keywords:O"),
-            alt.Tooltip(["extracted_keywords", "serp_frequency"]),
-        )
-            .properties(width=800, height=400)
-            .interactive()
-    )
-    st.altair_chart(chart)
-
-    st.subheader("🪄 Related Keywords Table")
-    st.write(df)
-
-    def convert_df(df):
-        return df.to_csv(index=False).encode("utf-8")
+# Mostramos tablas de resultados
+from collections import Counter # contador para mostrar en tabla
+contadorPreguntas1 = [list(x) for x in Counter(contadorPreguntas).most_common()]
+contadorBusquedas1 = [list(x) for x in Counter(contadorBusquedas +contadorSuggest ).most_common()]
 
 
-    # download results
-    st.write("")
-    csv = convert_df(df)
-    st.download_button(
-        label="💾 Download The Data!",
-        data=csv,
-        file_name="related_serp_keywords.csv",
-        mime="text/csv",
-    )
+import pandas as pd
+from google.colab import data_table
+# Uso una función para visualizar tablas
+def pasarATabla(lista,columnas):
+  lista = pd.DataFrame (lista, columns = columnas )
+  lista = data_table.DataTable(lista, include_index=True, num_rows_per_page=20)
+  display(lista)
+
+if len(contadorBusquedas1) > 0:
+  print("---------------------------------")
+  print("Siento una conmoción en la fuerza")
+  print("----------------------------------------------------------------")
+  print(f"Si quieres obtener más resultados prueba con nivelesScrapeo = {nivelesScrapeo+1}")
+  print("----------------------------------------------------------------")
+  pasarATabla(contadorBusquedas1, ["Búsqueda relacionada", "Relevancia"])
+
+if len(contadorPreguntas1) > 0:
+  pasarATabla(contadorPreguntas1, ["Preguntas relacionadas", "Relevancia"])
