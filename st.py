@@ -27,6 +27,7 @@ model_radio_button = st.sidebar.radio(
         "paraphrase-MiniLM-L3-v2",
     ],
     help="""the model to use for the clustering.
+
     - multi-qa-mpnet-base-dot-v1 - Best Semantic Clustering (🐌)
     - paraphrase-multilingual-MiniLM-L12-v2 - Best Multi-Lingual Clustering (💬)
     - paraphrase-MiniLM-L3-v2 - Best Performance (💨)"""
@@ -82,6 +83,7 @@ if uploaded_file is not None:
         st.warning(
             """
             🚨 The file doesn't seem to load. Check the filetype, file format and Schema
+
             """
         )
 
